@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "qris_venv/bin/python",
+  "python.interpreterPath": "qris_venv/bin/python"
+}
