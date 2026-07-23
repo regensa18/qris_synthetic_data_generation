@@ -15,24 +15,31 @@ import numpy as np
 import pandas as pd
 
 
-def get_weekly_multiplier(dates, location_type: str = "residential") -> np.ndarray:
+def get_weekly_multiplier(dates, location_type="residential", holiday_calendar=None) -> np.ndarray:
     """
     Returns a per-day multiplier array based on location_type,
-    per the design doc's weekly seasonality modifiers.
+    with holiday_calendar treated as "weekend-equivalent" days.
 
-    - residential: mild weekend bump (default assumption)
-    - office_district: weekday-high, sharp weekend drop
-    - attraction: weekend-high, weekday-low
-    - market: roughly flat by day-of-week (baseline, no strong weekly signal)
+    holiday_calendar: optional set/list of date strings or pd.Timestamps
+        representing national holidays / long-weekend days (cuti bersama).
     """
     is_weekend = dates.weekday >= 5
 
+    if holiday_calendar is not None:
+        holiday_set = pd.to_datetime(list(holiday_calendar))
+        is_holiday = dates.isin(holiday_set)
+    else:
+        is_holiday = np.zeros(len(dates), dtype=bool)
+
+    # a day counts as "elevated" if it's a weekend OR a holiday
+    is_elevated = is_weekend | is_holiday
+
     if location_type == "residential":
-        return np.where(is_weekend, 1.15, 1.0)
+        return np.where(is_elevated, 1.15, 1.0)
     elif location_type == "office_district":
-        return np.where(is_weekend, 0.4, 1.0)
+        return np.where(is_elevated, 0.4, 1.0)
     elif location_type == "attraction":
-        return np.where(is_weekend, 1.7, 0.6)
+        return np.where(is_elevated, 1.7, 0.6)
     elif location_type == "market":
         return np.ones(len(dates))
     else:
@@ -46,6 +53,7 @@ def generate_steady_merchant(
     location_type: str = "residential",
     start_date: str = "2025-01-01",
     seed: int | None = None,
+    holidays: list[str] | None = None,
 ) -> dict:
     """
     Generate a daily revenue series for a 'steady' archetype merchant,
@@ -64,7 +72,7 @@ def generate_steady_merchant(
     rng = np.random.default_rng(seed)
     dates = pd.date_range(start_date, periods=days, freq="D")
 
-    weekly_multiplier = get_weekly_multiplier(dates, location_type)
+    weekly_multiplier = get_weekly_multiplier(dates, location_type, holidays)
     noise = rng.lognormal(mean=0.0, sigma=noise_sigma, size=days)
     revenue = base_revenue * weekly_multiplier * noise
 
@@ -85,7 +93,8 @@ def generate_steady_merchant(
 if __name__ == "__main__":
     # Quick smoke test when running this file directly:
     #   python generator.py
-    result = generate_steady_merchant(seed=42)
+    holidays_2025 = ["2025-01-01", "2025-01-27", "2025-01-29"]
+    result = generate_steady_merchant(seed=42, holidays=holidays_2025)
     print(result["data"].head())
     print(f"\nArchetype: {result['archetype']}, expected_eligible: {result['expected_eligible']}")
     print(f"Params: {result['params']}")
