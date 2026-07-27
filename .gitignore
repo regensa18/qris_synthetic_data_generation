@@ -2,3 +2,6 @@ qris_venv/
 __pycache__/
 *.pyc
 .DS_Store
+.venv/
+settings.json
+pyrightconfig.json
