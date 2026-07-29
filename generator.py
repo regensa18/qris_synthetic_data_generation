@@ -1,16 +1,3 @@
-"""
-generator.py
-
-Core synthetic QRIS merchant transaction data generator.
-
-This module holds the real, importable logic — it's the source of truth.
-Exploration/plotting/parameter-tuning happens in exploration.ipynb, which
-imports from here rather than duplicating logic.
-
-Current state: steady archetype, with location_type as a weekly-seasonality
-modifier (per design doc) and ground-truth labels attached to the output.
-"""
-
 import numpy as np
 import pandas as pd
 
@@ -20,6 +7,13 @@ ARCHETYPE_CONFIGS = {
     "growing":   dict(trend_slope=0.0025,  noise_sigma=0.10, archetype_label="growing",   expected_eligible=True),
     "declining": dict(trend_slope=-0.0025, noise_sigma=0.10, archetype_label="declining", expected_eligible=False),
     "volatile":  dict(trend_slope=0.0,     noise_sigma=0.45, archetype_label="volatile",  expected_eligible="ambiguous — genuine test case for rule engine judgment"),
+    "seasonal": dict(
+        trend_slope=0.0, noise_sigma=0.10,
+        seasonal_peak_date="2025-03-31",  # example Lebaran date, adjust per year generated
+        seasonal_amplitude=0.5,
+        seasonal_width_days=10,
+        archetype_label="seasonal", expected_eligible=True,
+    )
 }
 
 def get_weekly_multiplier(dates, location_type="residential", holiday_calendar=None) -> np.ndarray:
@@ -155,6 +149,29 @@ def generate_event_based_merchant(
         },
     }
 
+def get_annual_multiplier(dates, seasonal_peak_date=None, seasonal_amplitude=0.0, seasonal_width_days=10):
+    """
+    Returns a per-day multiplier representing an annual seasonal bump
+    (e.g. Ramadan/Lebaran spike), as a smooth Gaussian curve centered on
+    seasonal_peak_date rather than a hard on/off window — real seasonal
+    demand ramps up before and tapers down after, not a step function.
+
+    seasonal_peak_date: the date of peak demand (e.g. Lebaran/Idul Fitri).
+        Must be supplied explicitly by the caller since it shifts every
+        year on the Islamic lunar calendar — never hardcode a fixed
+        month/day as a default.
+    seasonal_amplitude: how much extra revenue at peak, e.g. 0.4 = +40%
+    seasonal_width_days: how spread out the bump is; larger = more gradual
+    """
+    if seasonal_peak_date is None or seasonal_amplitude == 0.0:
+        return np.ones(len(dates))
+
+    peak = pd.to_datetime(seasonal_peak_date)
+    days_from_peak = (dates - peak).days.values.astype(float)
+
+    bump = seasonal_amplitude * np.exp(-(days_from_peak ** 2) / (2 * seasonal_width_days ** 2))
+    return 1.0 + bump
+
 def generate_merchant(
     days: int = 180,
     base_revenue: float = 500_000,
@@ -166,6 +183,9 @@ def generate_merchant(
     expected_eligible=True,
     start_date: str = "2025-01-01",
     seed: int | None = None,
+    seasonal_peak_date=None,
+    seasonal_amplitude=0.0,
+    seasonal_width_days=10,
 ) -> dict:
     """
     Generalized merchant generator: trend + weekly seasonality + noise.
@@ -184,9 +204,10 @@ def generate_merchant(
     trend_multiplier = (1 + trend_slope) ** day_index
 
     weekly_multiplier = get_weekly_multiplier(dates, location_type, holiday_calendar)
+    annual_multiplier = get_annual_multiplier(dates, seasonal_peak_date, seasonal_amplitude, seasonal_width_days)
     noise = rng.lognormal(mean=0.0, sigma=noise_sigma, size=days)
 
-    revenue = base_revenue * trend_multiplier * weekly_multiplier * noise
+    revenue = base_revenue * trend_multiplier * weekly_multiplier * annual_multiplier * noise
 
     df = pd.DataFrame({"date": dates, "revenue": revenue})
 
@@ -195,18 +216,44 @@ def generate_merchant(
         "archetype": archetype_label,
         "expected_eligible": expected_eligible,
         "params": {
-            "base_revenue": base_revenue,
-            "trend_slope": trend_slope,
-            "noise_sigma": noise_sigma,
-            "location_type": location_type,
+            "base_revenue": base_revenue, "trend_slope": trend_slope,
+            "noise_sigma": noise_sigma, "location_type": location_type,
+            "seasonal_peak_date": seasonal_peak_date, "seasonal_amplitude": seasonal_amplitude,
         },
     }
 
+def apply_shock_event(revenue: np.ndarray, dates, shock_date, duration_days: int, recovery: str = "full") -> np.ndarray:
+    """
+    Apply an abrupt shock (e.g. fire, forced closure) to an already-generated
+    revenue series. This is a post-processing step on top of any continuous
+    archetype (steady, growing, etc.), not part of the core trend/seasonality
+    model, since a shock is an external event, not a behavior pattern.
+
+    shock_date: date the shock occurs
+    duration_days: how long the merchant is at zero/near-zero
+    recovery: "full" (returns to original level after), "partial" (returns
+        to a reduced level), or "none" (stays at zero for the rest of the series)
+    """
+    revenue = revenue.copy()
+    shock = pd.to_datetime(shock_date)
+    shock_idx = (dates == shock).argmax()  # index of the shock date
+    end_idx = shock_idx + duration_days
+
+    # zero out revenue during the shock window
+    revenue[shock_idx:end_idx] = revenue[shock_idx:end_idx] * 0.02  # near-zero, not literally 0
+
+    if recovery == "full":
+        pass  # revenue after end_idx is untouched, already at original level
+    elif recovery == "partial":
+        revenue[end_idx:] = revenue[end_idx:] * 0.6  # settles at 60% of original level
+    elif recovery == "none":
+        revenue[end_idx:] = revenue[end_idx:] * 0.02  # stays near-zero permanently
+    else:
+        raise ValueError(f"Unknown recovery type: {recovery}")
+
+    return revenue
+
 if __name__ == "__main__":
-    # Quick smoke test when running this file directly:
-    #   python generator.py
-    holidays_2025 = ["2025-01-01", "2025-01-27", "2025-01-29"]
-    result = generate_steady_merchant(seed=42, holidays=holidays_2025)
+    result = generate_merchant(seed=42, **ARCHETYPE_CONFIGS["seasonal"])
     print(result["data"].head())
-    print(f"\nArchetype: {result['archetype']}, expected_eligible: {result['expected_eligible']}")
-    print(f"Params: {result['params']}")
+    print(f"\nArchetype: {result['archetype']}, params: {result['params']}")
