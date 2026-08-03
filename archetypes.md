@@ -111,7 +111,23 @@ These fields should actually influence generation behavior, not just sit in the 
 | Field | Description | Why it matters for archetypes |
 |---|---|---|
 | `mcc` | Merchant Category Code — 4-digit, ISO 18245-standardized classification of business type | Different business types plausibly have different baseline volatility/seasonality (e.g. a food-stall MCC vs. a retail-goods MCC). Could be used to bias which `location_type`/`archetype` combinations are realistic for a given MCC, or just to make generated merchants feel less arbitrary. |
-| `merchant_business_scale` | Indonesia-specific business size category: `UMI` (usaha mikro/micro), `UKE` (usaha kecil/small), `UME` (usaha menengah/medium), `UBE` (usaha besar/large) | Directly relevant to the BPR/MSME research framing — most of this project's target merchants would be `UMI`/`UKE`. Could bias transaction amount distributions (smaller scale → smaller typical transaction sizes, tighter margins) and give a natural way to filter which archetypes are even plausible for a given scale (e.g. a `UMI` merchant is unlikely to have `growing` archetype driven by "new branch"). |
+| `merchant_business_scale` | Indonesia-specific business size category: `UMI` (usaha mikro/micro), `UKE` (usaha kecil/small), `UME` (usaha menengah/medium) | Directly relevant to the BPR/MSME research framing — most of this project's target merchants would be `UMI`/`UKE`. Could bias transaction amount distributions (smaller scale → smaller typical transaction sizes, tighter margins) and give a natural way to filter which archetypes are even plausible for a given scale (e.g. a `UMI` merchant is unlikely to have `growing` archetype driven by "new branch"). |
+
+**Correction (post-implementation):** `merchant_business_scale` should only include `UMI` / `UKE` / `UME`. `UBE` (usaha besar) was mistakenly included in early implementation but is **not** part of UMKM — UMKM stands for Usaha Mikro, Kecil, dan Menengah specifically; usaha besar is a legally distinct category (net worth/revenue exceeding usaha menengah's threshold, uncapped above that). Since the parent research proposal targets BPR credit scoring for MSME merchants specifically, a BPR realistically wouldn't be underwriting usaha besar-scale businesses, including UBE didn't serve the project's framing and was removed. Also removed UBE from `BUSINESS_SCALE_CONFIGS` in `generator.py` for this reason.
+
+**Reference: annual → daily revenue thresholds (PP 7/2021)**
+
+The public annual revenue bands under PP 7/2021 (Pasal 35–36), divided by 365 to get a rough daily ceiling/floor, give a sanity-check range for `base_revenue`:
+
+| Scale | Annual revenue (PP 7/2021) | Implied daily revenue range |
+|---|---|---|
+| UMI (mikro) | up to Rp2 billion | up to ≈ Rp5.5 million/day |
+| UKE (kecil) | Rp2–15 billion | ≈ Rp5.5M – Rp41M/day |
+| UME (menengah) | Rp15–50 billion | ≈ Rp41M – Rp137M/day |
+
+Note the large gap between these regulatory ceilings and the generator's actual `base_revenue` defaults (e.g. UMI ≈ Rp350k/day, far below the Rp5.5M/day ceiling). This is intentional: the regulatory bands describe the *legal maximum* a business can earn while still qualifying for that tier, not a typical/median value, most real UMI merchants (a small warung, a food stall) operate far below the ceiling. The generator's defaults are chosen to represent a *typical* small merchant within each tier, not the tier's upper bound, and should be read as "plausible for this category," not "calibrated to this exact regulatory midpoint."
+
+Source: PP No. 7 Tahun 2021 tentang Kemudahan, Pelindungan, dan Pemberdayaan Koperasi dan UMKM, Pasal 35–36.
 
 ### Tier 2 — Structural realism only (cosmetic, doesn't drive generation logic)
 

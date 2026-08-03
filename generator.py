@@ -1,19 +1,53 @@
 import numpy as np
 import pandas as pd
+import uuid
+import os
+from typing import TypedDict, Any
 
 
-ARCHETYPE_CONFIGS = {
-    "steady":    dict(trend_slope=0.0,     noise_sigma=0.08, archetype_label="steady",    expected_eligible=True),
-    "growing":   dict(trend_slope=0.0025,  noise_sigma=0.10, archetype_label="growing",   expected_eligible=True),
-    "declining": dict(trend_slope=-0.0025, noise_sigma=0.10, archetype_label="declining", expected_eligible=False),
-    "volatile":  dict(trend_slope=0.0,     noise_sigma=0.45, archetype_label="volatile",  expected_eligible="ambiguous — genuine test case for rule engine judgment"),
-    "seasonal": dict(
-        trend_slope=0.0, noise_sigma=0.10,
-        seasonal_peak_date="2025-03-31",  # example Lebaran date, adjust per year generated
-        seasonal_amplitude=0.5,
-        seasonal_width_days=10,
-        archetype_label="seasonal", expected_eligible=True,
-    )
+class ArchetypeConfig(TypedDict, total=False):
+    trend_slope: float
+    noise_sigma: float
+    archetype_label: str
+    expected_eligible: bool | str
+    seasonal_peak_date: str | None
+    seasonal_amplitude: float
+    seasonal_width_days: int
+
+
+ARCHETYPE_CONFIGS: dict[str, ArchetypeConfig] = {
+    "steady":    {"trend_slope": 0.0,     "noise_sigma": 0.08, "archetype_label": "steady",    "expected_eligible": True},
+    "growing":   {"trend_slope": 0.0025,  "noise_sigma": 0.10, "archetype_label": "growing",   "expected_eligible": True},
+    "declining": {"trend_slope": -0.0025, "noise_sigma": 0.10, "archetype_label": "declining", "expected_eligible": False},
+    "volatile":  {"trend_slope": 0.0,     "noise_sigma": 0.45, "archetype_label": "volatile",  "expected_eligible": "ambiguous — genuine test case for rule engine judgment"},
+    "seasonal": {
+        "trend_slope": 0.0, "noise_sigma": 0.10,
+        "seasonal_peak_date": "2025-03-31",  # example Lebaran date, adjust per year generated
+        "seasonal_amplitude": 0.5,
+        "seasonal_width_days": 10,
+        "archetype_label": "seasonal", "expected_eligible": True,
+    }
+}
+
+BUSINESS_SCALE_CONFIGS = {
+    "UMI": dict(base_revenue=350_000,   base_count=12),   # avg ≈ 29,000
+    "UKE": dict(base_revenue=900_000,   base_count=28),   # avg ≈ 32,000
+    "UME": dict(base_revenue=2_800_000, base_count=75),   # avg ≈ 37,000
+    # "UBE": dict(base_revenue=6_500_000, base_count=160),  # avg ≈ 41,000, not going tio include it because it's not the scope of MSMEs
+}
+
+# Kept for backward compatibility with earlier notebook cells; prefer
+# BUSINESS_SCALE_CONFIGS[scale]["base_count"] going forward.
+BUSINESS_SCALE_TRANSACTION_COUNT = {
+    scale: cfg["base_count"] for scale, cfg in BUSINESS_SCALE_CONFIGS.items()
+}
+
+BUSINESS_TYPES = {
+    "warung_sembako":      dict(mcc="5411", label="Toko Sembako",        typical_archetypes=["steady", "declining", "growing"]),
+    "fried_chicken_stall": dict(mcc="5814", label="Warung Ayam Goreng",  typical_archetypes=["steady", "seasonal", "growing"]),
+    "coffee_shop":         dict(mcc="5812", label="Kedai Kopi",          typical_archetypes=["steady", "growing", "volatile"]),
+    "photocopy_shop":      dict(mcc="7338", label="Fotokopi & Percetakan", typical_archetypes=["steady", "declining"]),
+    "bazaar_vendor":       dict(mcc="5399", label="Pedagang Bazaar",     typical_archetypes=["event_based"]),
 }
 
 def get_weekly_multiplier(dates, location_type="residential", holiday_calendar=None) -> np.ndarray:
@@ -47,48 +81,48 @@ def get_weekly_multiplier(dates, location_type="residential", holiday_calendar=N
         raise ValueError(f"Unknown location_type: {location_type}")
 
 
-def generate_steady_merchant(
-    days: int = 180,
-    base_revenue: float = 500_000,
-    noise_sigma: float = 0.08,
-    location_type: str = "residential",
-    start_date: str = "2025-01-01",
-    seed: int | None = None,
-    holidays: list[str] | None = None,
-) -> dict:
-    """
-    Generate a daily revenue series for a 'steady' archetype merchant,
-    with a location_type modifier controlling weekly seasonality shape.
+# def generate_steady_merchant(
+#     days: int = 180,
+#     base_revenue: float = 500_000,
+#     noise_sigma: float = 0.08,
+#     location_type: str = "residential",
+#     start_date: str = "2025-01-01",
+#     seed: int | None = None,
+#     holidays: list[str] | None = None,
+# ) -> dict:
+#     """
+#     Generate a daily revenue series for a 'steady' archetype merchant,
+#     with a location_type modifier controlling weekly seasonality shape.
 
-    revenue(t) = base_revenue * weekly_multiplier(t, location_type) * lognormal_noise(t)
+#     revenue(t) = base_revenue * weekly_multiplier(t, location_type) * lognormal_noise(t)
 
-    Returns a dict bundling the data with its ground-truth labels:
-        {
-            "data": pd.DataFrame with columns [date, revenue],
-            "archetype": "steady",
-            "expected_eligible": True,
-            "params": {...},
-        }
-    """
-    rng = np.random.default_rng(seed)
-    dates = pd.date_range(start_date, periods=days, freq="D")
+#     Returns a dict bundling the data with its ground-truth labels:
+#         {
+#             "data": pd.DataFrame with columns [date, revenue],
+#             "archetype": "steady",
+#             "expected_eligible": True,
+#             "params": {...},
+#         }
+#     """
+#     rng = np.random.default_rng(seed)
+#     dates = pd.date_range(start_date, periods=days, freq="D")
 
-    weekly_multiplier = get_weekly_multiplier(dates, location_type, holidays)
-    noise = rng.lognormal(mean=0.0, sigma=noise_sigma, size=days)
-    revenue = base_revenue * weekly_multiplier * noise
+#     weekly_multiplier = get_weekly_multiplier(dates, location_type, holidays)
+#     noise = rng.lognormal(mean=0.0, sigma=noise_sigma, size=days)
+#     revenue = base_revenue * weekly_multiplier * noise
 
-    df = pd.DataFrame({"date": dates, "revenue": revenue})
+#     df = pd.DataFrame({"date": dates, "revenue": revenue})
 
-    return {
-        "data": df,
-        "archetype": "steady",
-        "expected_eligible": True,
-        "params": {
-            "base_revenue": base_revenue,
-            "noise_sigma": noise_sigma,
-            "location_type": location_type,
-        },
-    }
+#     return {
+#         "data": df,
+#         "archetype": "steady",
+#         "expected_eligible": True,
+#         "params": {
+#             "base_revenue": base_revenue,
+#             "noise_sigma": noise_sigma,
+#             "location_type": location_type,
+#         },
+#     }
 
 
 def generate_event_based_merchant(
@@ -180,22 +214,29 @@ def generate_merchant(
     location_type: str = "residential",
     holiday_calendar=None,
     archetype_label: str = "steady",
-    expected_eligible=True,
+    expected_eligible: bool | str = True,
     start_date: str = "2025-01-01",
     seed: int | None = None,
     seasonal_peak_date=None,
     seasonal_amplitude=0.0,
     seasonal_width_days=10,
+    merchant_business_scale: str | None = None,
 ) -> dict:
     """
-    Generalized merchant generator: trend + weekly seasonality + noise.
-
-    revenue(t) = base_revenue * (1 + trend_slope)^t * weekly_multiplier(t) * lognormal_noise(t)
-
-    archetype_label / expected_eligible are passed in by the caller (see
-    archetype configs below) rather than hardcoded, so this one function
-    covers steady, growing, declining, and volatile just by varying params.
+    Generalized merchant generator: trend + weekly seasonality + annual seasonality + noise.
+ 
+    merchant_business_scale: optional "UMI"/"UKE"/"UME"/"UBE". If provided,
+    OVERRIDES base_revenue with the value from BUSINESS_SCALE_CONFIGS, so
+    revenue level stays consistent with the scale's transaction-count config
+    (see sample_daily_transaction_counts). If None, base_revenue is used as-is
+    and no scale label is attached (caller can still set it manually via
+    the returned dict if needed).
     """
+    if merchant_business_scale is not None:
+        if merchant_business_scale not in BUSINESS_SCALE_CONFIGS:
+            raise ValueError(f"Unknown merchant_business_scale: {merchant_business_scale}")
+        base_revenue = BUSINESS_SCALE_CONFIGS[merchant_business_scale]["base_revenue"]
+
     rng = np.random.default_rng(seed)
     dates = pd.date_range(start_date, periods=days, freq="D")
 
@@ -253,7 +294,177 @@ def apply_shock_event(revenue: np.ndarray, dates, shock_date, duration_days: int
 
     return revenue
 
+# ---------------------------------------------------------------------------
+# Transaction-level splitting
+# ---------------------------------------------------------------------------
+ 
+def sample_daily_transaction_count(base_count: int = 12, seed: int | None = None) -> int:
+    """
+    Poisson-distributed transaction count for a single day. Count data
+    (discrete events per day) is standard-modeled as Poisson; base_count
+    (lambda) should come from general reasoning about merchant footfall,
+    not from any specific real dataset.
+    """
+    rng = np.random.default_rng(seed)
+    return max(1, rng.poisson(lam=base_count))
+
+def sample_daily_transaction_counts(days: int, base_count: int = 12, seed: int | None = None) -> np.ndarray:
+    """Vectorized version: one Poisson draw per day across the full series."""
+    rng = np.random.default_rng(seed)
+    return np.maximum(1, rng.poisson(lam=base_count, size=days))
+
+######
+def split_day_into_transactions(daily_revenue, n_transactions, seed=None):
+    """
+    Split a day's total revenue into n_transactions amounts that sum to it,
+    log-normal weighted so most transactions are small with occasional larger ones.
+    """
+    rng = np.random.default_rng(seed)
+    weights = rng.lognormal(mean=0, sigma=0.6, size=n_transactions)
+    weights = weights / weights.sum()
+    return daily_revenue * weights
+
+def generate_transactions(
+    result: dict,
+    business_type: str,
+    merchant_business_scale: str = "UMI",
+    merchant_id: str | None = None,
+    seed: int | None = None,
+) -> pd.DataFrame:
+    """
+    Expand a generate_merchant()/generate_event_based_merchant() result dict
+    into transaction-level rows matching the canonical schema.
+ 
+    business_type: key into BUSINESS_TYPES (e.g. "warung_sembako",
+        "coffee_shop") — drives mcc and pop_name label.
+    merchant_business_scale: key into BUSINESS_SCALE_CONFIGS — drives
+        transaction count per day.
+    """
+
+    if business_type not in BUSINESS_TYPES:
+        raise ValueError(f"Unknown business_type: {business_type}. Options: {list(BUSINESS_TYPES)}")
+    if merchant_business_scale not in BUSINESS_SCALE_CONFIGS:
+        raise ValueError(f"Unknown merchant_business_scale: {merchant_business_scale}")
+
+    biz = BUSINESS_TYPES[business_type]
+    rng = np.random.default_rng(seed)
+    df = result["data"]
+    base_count = BUSINESS_SCALE_CONFIGS[merchant_business_scale]["base_count"]
+    merchant_id = merchant_id or f"SYN{rng.integers(100000, 999999)}"
+    pop_name = f"{biz['label']} {merchant_id[-4:]}"
+
+    rows = []
+    for _, row in df.iterrows():
+        n_tx = sample_daily_transaction_count(base_count=base_count)
+        amounts = split_day_into_transactions(row["revenue"], n_tx)
+
+        for amt in amounts:
+            rows.append({
+                "merchant_id": merchant_id,
+                "date": row["date"].strftime("%Y-%m-%d"),
+                "amount": round(float(amt), 2),
+                "type": "credit",
+                "pop_name": f"POP-{merchant_id}",
+                "rrn": str(uuid.uuid4().int)[:12],  # placeholder unique reference
+                "mcc": "5812",  # example: eating places/restaurants
+                "merchant_business_scale": merchant_business_scale,
+                "business_type": business_type,
+            })
+
+    tx_df = pd.DataFrame(rows)
+    tx_df["archetype"] = result["archetype"]
+    tx_df["expected_eligible"] = str(result["expected_eligible"])
+    return tx_df
+
+def generate_and_save_merchant(
+    output_dir: str,
+    archetype_name: str,
+    business_type: str = "coffee_shop",
+    merchant_business_scale: str = "UMI",
+    location_type: str = "residential",
+    merchant_id: str | None = None,
+    seed: int | None = None,
+) -> str:
+    """
+    Generates one merchant (continuous archetype or event_based), expands to
+    transaction-level rows using business_type + merchant_business_scale,
+    and writes it to its own CSV. Returns the filepath written.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if archetype_name == "event_based":
+        result = generate_event_based_merchant(seed=seed)
+    else:
+        if archetype_name not in ARCHETYPE_CONFIGS:
+            raise ValueError(f"Unknown archetype_name: {archetype_name}")
+        cfg = ARCHETYPE_CONFIGS[archetype_name]
+        result = generate_merchant(
+            merchant_business_scale=merchant_business_scale,
+            location_type=location_type,
+            seed=seed,
+            **cfg,
+        )
+
+    merchant_id = merchant_id or f"SYN-{archetype_name}-{merchant_business_scale}-{seed}"
+    tx_df = generate_transactions(
+        result,
+        business_type=business_type,
+        merchant_business_scale=merchant_business_scale,
+        merchant_id=merchant_id,
+        seed=seed,
+    )
+
+    filename = f"{merchant_id}.csv"
+    filepath = os.path.join(output_dir, filename)
+    tx_df.to_csv(filepath, index=False)
+
+    return filepath
+
 if __name__ == "__main__":
-    result = generate_merchant(seed=42, **ARCHETYPE_CONFIGS["seasonal"])
-    print(result["data"].head())
-    print(f"\nArchetype: {result['archetype']}, params: {result['params']}")
+    # result = generate_merchant(seed=42, **ARCHETYPE_CONFIGS["seasonal"])
+    # print(result["data"].head())
+    # print(f"\nArchetype: {result['archetype']}, params: {result['params']}")
+
+    # result = generate_merchant(seed = 42, **ARCHETYPE_CONFIGS["steady"])
+    # df = result["data"]
+
+    # df["revenue"] = apply_shock_event(df["revenue"].values, df["date"], shock_date="2025-04-10", duration_days=18, recovery="full")
+    # print(df.head())
+
+    # result["params"]["shock_event"] = {"shock_date": "2025-04-10", "duration_days": 18, "recovery": "full"}
+
+    # counts = sample_daily_transaction_counts(30, base_count=BUSINESS_SCALE_TRANSACTION_COUNT["UMI"], seed=1)
+    # print(f"\nExample 30-day transaction counts (UMI): {counts}")
+    # print(f"min={counts.min()}, max={counts.max()}, mean={counts.mean():.1f}")
+
+    # result = generate_merchant(merchant_business_scale="UKE", seed=42, **ARCHETYPE_CONFIGS["steady"])
+
+    # tx_df = generate_transactions(result, merchant_business_scale="UKE", seed=1)
+    # tx_df.to_csv("synthetic_merchant_steady_UKE.csv", index=False)
+    # tx_df.head(10)
+
+    # output_dir = "synthetic_merchants"
+
+    # merchants_to_generate: list[dict[str, Any]] = [
+    #     {"archetype_name": "steady", "merchant_business_scale": "UMI", "location_type": "residential", "seed": 1},
+    #     {"archetype_name": "steady", "merchant_business_scale": "UKE", "location_type": "office_district", "seed": 2},
+    #     {"archetype_name": "growing", "merchant_business_scale": "UME", "location_type": "attraction", "seed": 3},
+    #     {"archetype_name": "declining", "merchant_business_scale": "UMI", "location_type": "market", "seed": 4},
+    #     {"archetype_name": "volatile", "merchant_business_scale": "UKE", "location_type": "residential", "seed": 5},
+    #     {"archetype_name": "seasonal", "merchant_business_scale": "UMI", "location_type": "residential", "seed": 6},
+    #     {"archetype_name": "event_based", "merchant_business_scale": "UMI", "seed": 7},
+    # ]
+
+    # for config in merchants_to_generate:
+    #     path = generate_and_save_merchant(output_dir, **config)
+    #     print(f"Wrote {path}")
+
+    path = generate_and_save_merchant(
+        output_dir="synthetic_merchants",
+        archetype_name="steady",
+        business_type="coffee_shop",
+        merchant_business_scale="UKE",
+        location_type="office_district",
+        seed=42,
+    )
+    print(f"Wrote {path}")

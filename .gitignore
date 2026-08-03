@@ -7,3 +7,5 @@ __pycache__/
 .venv/
 settings.json
 pyrightconfig.json
+synthetic_merchants/
+.vscode/
