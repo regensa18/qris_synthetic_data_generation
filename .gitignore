@@ -9,3 +9,4 @@ settings.json
 pyrightconfig.json
 synthetic_merchants/
 .vscode/
+synthetic_merchants_with_shock/

@@ -263,36 +263,38 @@ def generate_merchant(
         },
     }
 
-def apply_shock_event(revenue: np.ndarray, dates, shock_date, duration_days: int, recovery: str = "full") -> np.ndarray:
+def apply_shock_event(revenue: np.ndarray, dates, shock_date, duration_days: int, recovery: str = "full"):
     """
     Apply an abrupt shock (e.g. fire, forced closure) to an already-generated
-    revenue series. This is a post-processing step on top of any continuous
-    archetype (steady, growing, etc.), not part of the core trend/seasonality
-    model, since a shock is an external event, not a behavior pattern.
+    revenue series.
 
-    shock_date: date the shock occurs
-    duration_days: how long the merchant is at zero/near-zero
-    recovery: "full" (returns to original level after), "partial" (returns
-        to a reduced level), or "none" (stays at zero for the rest of the series)
+    Returns (revenue, shock_mask): shock_mask is a boolean array marking
+    which days fall inside the shock window. A shut-down merchant genuinely
+    processes ZERO QRIS transactions on those days, so downstream transaction generation should
+    use shock_mask to skip transaction generation entirely for those days.
     """
     revenue = revenue.copy()
     shock = pd.to_datetime(shock_date)
-    shock_idx = (dates == shock).argmax()  # index of the shock date
+    shock_idx = (dates == shock).argmax()
     end_idx = shock_idx + duration_days
 
+    shock_mask = np.zeros(len(revenue), dtype=bool)
+    shock_mask[shock_idx:end_idx] = True
+
     # zero out revenue during the shock window
-    revenue[shock_idx:end_idx] = revenue[shock_idx:end_idx] * 0.02  # near-zero, not literally 0
+    revenue[shock_idx:end_idx] = 0.0
 
     if recovery == "full":
         pass  # revenue after end_idx is untouched, already at original level
     elif recovery == "partial":
         revenue[end_idx:] = revenue[end_idx:] * 0.6  # settles at 60% of original level
     elif recovery == "none":
-        revenue[end_idx:] = revenue[end_idx:] * 0.02  # stays near-zero permanently
+        revenue[end_idx:] = 0.0
+        shock_mask[end_idx:] = True  # stays "closed" for the rest of the series
     else:
         raise ValueError(f"Unknown recovery type: {recovery}")
 
-    return revenue
+    return revenue, shock_mask
 
 # ---------------------------------------------------------------------------
 # Transaction-level splitting
@@ -329,16 +331,15 @@ def generate_transactions(
     business_type: str,
     merchant_business_scale: str = "UMI",
     merchant_id: str | None = None,
+    shock_mask: np.ndarray | None = None,
     seed: int | None = None,
 ) -> pd.DataFrame:
     """
     Expand a generate_merchant()/generate_event_based_merchant() result dict
     into transaction-level rows matching the canonical schema.
- 
-    business_type: key into BUSINESS_TYPES (e.g. "warung_sembako",
-        "coffee_shop") — drives mcc and pop_name label.
-    merchant_business_scale: key into BUSINESS_SCALE_CONFIGS — drives
-        transaction count per day.
+
+    shock_mask: optional boolean array (from apply_shock_event), same length
+    as result["data"]. Days marked True generate ZERO transactions.
     """
 
     if business_type not in BUSINESS_TYPES:
@@ -354,7 +355,11 @@ def generate_transactions(
     pop_name = f"{biz['label']} {merchant_id[-4:]}"
 
     rows = []
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
+        is_shocked = shock_mask is not None and shock_mask[i]
+        if is_shocked:
+            continue  # closed this day, zero transactions
+
         n_tx = sample_daily_transaction_count(base_count=base_count)
         amounts = split_day_into_transactions(row["revenue"], n_tx)
 
@@ -364,9 +369,9 @@ def generate_transactions(
                 "date": row["date"].strftime("%Y-%m-%d"),
                 "amount": round(float(amt), 2),
                 "type": "credit",
-                "pop_name": f"POP-{merchant_id}",
+                "pop_name": pop_name,
                 "rrn": str(uuid.uuid4().int)[:12],  # placeholder unique reference
-                "mcc": "5812",  # example: eating places/restaurants
+                "mcc": biz["mcc"],
                 "merchant_business_scale": merchant_business_scale,
                 "business_type": business_type,
             })
@@ -379,21 +384,33 @@ def generate_transactions(
 def generate_and_save_merchant(
     output_dir: str,
     archetype_name: str,
-    business_type: str = "coffee_shop",
+    business_type: str,
     merchant_business_scale: str = "UMI",
     location_type: str = "residential",
     merchant_id: str | None = None,
+    shock_date: str | None = None,
+    shock_duration_days: int | None = None,
+    shock_recovery: str = "full",
     seed: int | None = None,
 ) -> str:
     """
-    Generates one merchant (continuous archetype or event_based), expands to
-    transaction-level rows using business_type + merchant_business_scale,
-    and writes it to its own CSV. Returns the filepath written.
+    Generates one merchant (continuous archetype or event_based), optionally
+    applies a shock_event (e.g. fire, forced closure) to the daily revenue
+    series, then expands to transaction-level rows and writes it to its own
+    CSV. Returns the filepath written.
+ 
+    shock_date / shock_duration_days: if both provided, apply_shock_event()
+    is applied to the merchant's revenue series before transaction splitting.
+    Only meaningful for continuous archetypes (steady/growing/declining/
+    volatile/seasonal) — not applied to event_based merchants, since their
+    near-zero baseline already represents an "off" state and layering a
+    second shock mechanism on top isn't a meaningful combination.
     """
     os.makedirs(output_dir, exist_ok=True)
 
     if archetype_name == "event_based":
         result = generate_event_based_merchant(seed=seed)
+        shock_mask = None
     else:
         if archetype_name not in ARCHETYPE_CONFIGS:
             raise ValueError(f"Unknown archetype_name: {archetype_name}")
@@ -405,14 +422,37 @@ def generate_and_save_merchant(
             **cfg,
         )
 
+        shock_mask = None
+        if shock_date is not None and shock_duration_days is not None:
+            df = result["data"]
+            new_revenue, shock_mask = apply_shock_event(
+                df["revenue"].values,
+                df["date"],
+                shock_date=shock_date,
+                duration_days=shock_duration_days,
+                recovery=shock_recovery,
+            )
+            df["revenue"] = new_revenue
+            result["params"]["shock_event"] = {
+                "shock_date": shock_date,
+                "duration_days": shock_duration_days,
+                "recovery": shock_recovery,
+            }
+
     merchant_id = merchant_id or f"SYN-{archetype_name}-{merchant_business_scale}-{seed}"
     tx_df = generate_transactions(
         result,
         business_type=business_type,
         merchant_business_scale=merchant_business_scale,
         merchant_id=merchant_id,
+        shock_mask=shock_mask,
         seed=seed,
     )
+
+    if shock_date is not None and shock_duration_days is not None:
+        tx_df["shock_date"] = shock_date
+        tx_df["shock_duration_days"] = shock_duration_days
+        tx_df["shock_recovery"] = shock_recovery
 
     filename = f"{merchant_id}.csv"
     filepath = os.path.join(output_dir, filename)
@@ -421,50 +461,58 @@ def generate_and_save_merchant(
     return filepath
 
 if __name__ == "__main__":
-    # result = generate_merchant(seed=42, **ARCHETYPE_CONFIGS["seasonal"])
-    # print(result["data"].head())
-    # print(f"\nArchetype: {result['archetype']}, params: {result['params']}")
 
-    # result = generate_merchant(seed = 42, **ARCHETYPE_CONFIGS["steady"])
-    # df = result["data"]
+    merchants_to_generate: list[dict[str, Any]] = [
+        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="warung_sembako",      merchant_business_scale="UMI", location_type="residential",     seed=1),
+        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="coffee_shop",         merchant_business_scale="UKE", location_type="office_district",  seed=2),
+        dict(output_dir = "synthetic_merchants", archetype_name="growing",  business_type="coffee_shop",         merchant_business_scale="UME", location_type="attraction",       seed=3),
+        dict(output_dir = "synthetic_merchants", archetype_name="declining",business_type="photocopy_shop",      merchant_business_scale="UMI", location_type="market",           seed=4),
+        dict(output_dir = "synthetic_merchants", archetype_name="volatile", business_type="fried_chicken_stall", merchant_business_scale="UKE", location_type="residential",      seed=5),
+        dict(output_dir = "synthetic_merchants", archetype_name="seasonal", business_type="fried_chicken_stall", merchant_business_scale="UMI", location_type="residential",      seed=6),
+        dict(output_dir = "synthetic_merchants", archetype_name="event_based", business_type="bazaar_vendor",    merchant_business_scale="UMI", seed=7),
+    ]
 
-    # df["revenue"] = apply_shock_event(df["revenue"].values, df["date"], shock_date="2025-04-10", duration_days=18, recovery="full")
-    # print(df.head())
+    for config in merchants_to_generate:
+        path = generate_and_save_merchant(**config)
+        print(f"Wrote {path}")
 
-    # result["params"]["shock_event"] = {"shock_date": "2025-04-10", "duration_days": 18, "recovery": "full"}
-
-    # counts = sample_daily_transaction_counts(30, base_count=BUSINESS_SCALE_TRANSACTION_COUNT["UMI"], seed=1)
-    # print(f"\nExample 30-day transaction counts (UMI): {counts}")
-    # print(f"min={counts.min()}, max={counts.max()}, mean={counts.mean():.1f}")
-
-    # result = generate_merchant(merchant_business_scale="UKE", seed=42, **ARCHETYPE_CONFIGS["steady"])
-
-    # tx_df = generate_transactions(result, merchant_business_scale="UKE", seed=1)
-    # tx_df.to_csv("synthetic_merchant_steady_UKE.csv", index=False)
-    # tx_df.head(10)
-
-    # output_dir = "synthetic_merchants"
-
-    # merchants_to_generate: list[dict[str, Any]] = [
-    #     {"archetype_name": "steady", "merchant_business_scale": "UMI", "location_type": "residential", "seed": 1},
-    #     {"archetype_name": "steady", "merchant_business_scale": "UKE", "location_type": "office_district", "seed": 2},
-    #     {"archetype_name": "growing", "merchant_business_scale": "UME", "location_type": "attraction", "seed": 3},
-    #     {"archetype_name": "declining", "merchant_business_scale": "UMI", "location_type": "market", "seed": 4},
-    #     {"archetype_name": "volatile", "merchant_business_scale": "UKE", "location_type": "residential", "seed": 5},
-    #     {"archetype_name": "seasonal", "merchant_business_scale": "UMI", "location_type": "residential", "seed": 6},
-    #     {"archetype_name": "event_based", "merchant_business_scale": "UMI", "seed": 7},
-    # ]
-
-    # for config in merchants_to_generate:
-    #     path = generate_and_save_merchant(output_dir, **config)
-    #     print(f"Wrote {path}")
-
-    path = generate_and_save_merchant(
-        output_dir="synthetic_merchants",
-        archetype_name="steady",
-        business_type="coffee_shop",
-        merchant_business_scale="UKE",
-        location_type="office_district",
-        seed=42,
-    )
-    print(f"Wrote {path}")
+    # generate and save merchant with shock event (e.g. fire)
+    merchants_with_shock_to_generate: list[dict[str, Any]] = [
+        dict(
+            output_dir="synthetic_merchants_with_shock", 
+            archetype_name="steady",   
+            business_type="warung_sembako",      
+            merchant_business_scale="UMI", 
+            location_type="residential",     
+            seed=1, 
+            shock_date="2025-04-10",
+            shock_duration_days=18,
+            shock_recovery="full",
+        ),
+        dict(
+            output_dir="synthetic_merchants_with_shock", 
+            archetype_name="steady",   
+            business_type="coffee_shop",         
+            merchant_business_scale="UKE", 
+            location_type="office_district",  
+            seed=2,
+            shock_date="2025-07-11",
+            shock_duration_days=7,
+            shock_recovery="partial",
+        ),
+        dict(
+            output_dir="synthetic_merchants_with_shock", 
+            archetype_name="seasonal", 
+            business_type="fried_chicken_stall", 
+            merchant_business_scale="UMI", 
+            location_type="residential",      
+            seed=3,
+            shock_date="2025-10-11",
+            shock_duration_days=5,
+            shock_recovery="none",
+        ),
+    ]
+    
+    for config in merchants_with_shock_to_generate:
+        path = generate_and_save_merchant(**config)
+        print(f"Wrote {path}")
