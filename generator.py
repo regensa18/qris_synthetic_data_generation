@@ -275,8 +275,16 @@ def apply_shock_event(revenue: np.ndarray, dates, shock_date, duration_days: int
     """
     revenue = revenue.copy()
     shock = pd.to_datetime(shock_date)
+
+    if shock not in set(dates):
+        raise ValueError(
+            f"shock_date {shock_date} is outside the generated date range "
+            f"({dates.min().date()} to {dates.max().date()}). "
+            f"Adjust shock_date or increase `days` in generate_merchant()."
+        )
+
     shock_idx = (dates == shock).argmax()
-    end_idx = shock_idx + duration_days
+    end_idx = min(shock_idx + duration_days, len(revenue))  # clip so it can't run past the series
 
     shock_mask = np.zeros(len(revenue), dtype=bool)
     shock_mask[shock_idx:end_idx] = True
@@ -388,6 +396,8 @@ def generate_and_save_merchant(
     merchant_business_scale: str = "UMI",
     location_type: str = "residential",
     merchant_id: str | None = None,
+    days: int = 180,
+    start_date: str = "2025-01-01",
     shock_date: str | None = None,
     shock_duration_days: int | None = None,
     shock_recovery: str = "full",
@@ -409,7 +419,7 @@ def generate_and_save_merchant(
     os.makedirs(output_dir, exist_ok=True)
 
     if archetype_name == "event_based":
-        result = generate_event_based_merchant(seed=seed)
+        result = generate_event_based_merchant(days=days, start_date=start_date, seed=seed)
         shock_mask = None
     else:
         if archetype_name not in ARCHETYPE_CONFIGS:
@@ -418,11 +428,14 @@ def generate_and_save_merchant(
         result = generate_merchant(
             merchant_business_scale=merchant_business_scale,
             location_type=location_type,
+            days=days,
+            start_date=start_date,
             seed=seed,
             **cfg,
         )
-
+ 
         shock_mask = None
+        # Apply shock_event on top of the continuous archetype, if requested.
         if shock_date is not None and shock_duration_days is not None:
             df = result["data"]
             new_revenue, shock_mask = apply_shock_event(
@@ -439,7 +452,7 @@ def generate_and_save_merchant(
                 "recovery": shock_recovery,
             }
 
-    merchant_id = merchant_id or f"SYN-{archetype_name}-{merchant_business_scale}-{seed}"
+    merchant_id = merchant_id or f"SYN-{archetype_name}-{business_type}-{merchant_business_scale}-{seed}"
     tx_df = generate_transactions(
         result,
         business_type=business_type,
@@ -449,6 +462,8 @@ def generate_and_save_merchant(
         seed=seed,
     )
 
+    # Record the shock as a column too, so it's visible directly in the CSV
+    # without needing to cross-reference result["params"].
     if shock_date is not None and shock_duration_days is not None:
         tx_df["shock_date"] = shock_date
         tx_df["shock_duration_days"] = shock_duration_days
@@ -463,13 +478,13 @@ def generate_and_save_merchant(
 if __name__ == "__main__":
 
     merchants_to_generate: list[dict[str, Any]] = [
-        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="warung_sembako",      merchant_business_scale="UMI", location_type="residential",     seed=1),
-        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="coffee_shop",         merchant_business_scale="UKE", location_type="office_district",  seed=2),
-        dict(output_dir = "synthetic_merchants", archetype_name="growing",  business_type="coffee_shop",         merchant_business_scale="UME", location_type="attraction",       seed=3),
-        dict(output_dir = "synthetic_merchants", archetype_name="declining",business_type="photocopy_shop",      merchant_business_scale="UMI", location_type="market",           seed=4),
-        dict(output_dir = "synthetic_merchants", archetype_name="volatile", business_type="fried_chicken_stall", merchant_business_scale="UKE", location_type="residential",      seed=5),
-        dict(output_dir = "synthetic_merchants", archetype_name="seasonal", business_type="fried_chicken_stall", merchant_business_scale="UMI", location_type="residential",      seed=6),
-        dict(output_dir = "synthetic_merchants", archetype_name="event_based", business_type="bazaar_vendor",    merchant_business_scale="UMI", seed=7),
+        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="warung_sembako",      merchant_business_scale="UMI", location_type="residential",     seed=1, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="steady",   business_type="coffee_shop",         merchant_business_scale="UKE", location_type="office_district",  seed=2, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="growing",  business_type="coffee_shop",         merchant_business_scale="UME", location_type="attraction",       seed=3, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="declining",business_type="photocopy_shop",      merchant_business_scale="UMI", location_type="market",           seed=4, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="volatile", business_type="fried_chicken_stall", merchant_business_scale="UKE", location_type="residential",      seed=5, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="seasonal", business_type="fried_chicken_stall", merchant_business_scale="UMI", location_type="residential",      seed=6, days=365, start_date="2025-01-01"),
+        dict(output_dir = "synthetic_merchants", archetype_name="event_based", business_type="bazaar_vendor",    merchant_business_scale="UMI", seed=7, days=365, start_date="2025-01-01"),
     ]
 
     for config in merchants_to_generate:
@@ -488,6 +503,8 @@ if __name__ == "__main__":
             shock_date="2025-04-10",
             shock_duration_days=18,
             shock_recovery="full",
+            days=365, 
+            start_date="2025-01-01",
         ),
         dict(
             output_dir="synthetic_merchants_with_shock", 
@@ -499,6 +516,8 @@ if __name__ == "__main__":
             shock_date="2025-07-11",
             shock_duration_days=7,
             shock_recovery="partial",
+            days=365, 
+            start_date="2025-01-01",
         ),
         dict(
             output_dir="synthetic_merchants_with_shock", 
@@ -510,6 +529,8 @@ if __name__ == "__main__":
             shock_date="2025-10-11",
             shock_duration_days=5,
             shock_recovery="none",
+            days=365, 
+            start_date="2025-01-01",
         ),
     ]
     
