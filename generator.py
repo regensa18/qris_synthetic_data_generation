@@ -127,7 +127,6 @@ def get_weekly_multiplier(dates, location_type="residential", holiday_calendar=N
 
 def generate_event_based_merchant(
     days: int = 180,
-    baseline_revenue: float = 20_000,   # near-zero, not literally zero — occasional stray transaction
     event_revenue: float = 1_500_000,   # revenue level during an active event
     event_noise_sigma: float = 0.15,
     n_events: int = 4,                  # how many bazaar events across the window
@@ -145,8 +144,12 @@ def generate_event_based_merchant(
     rng = np.random.default_rng(seed)
     dates = pd.date_range(start_date, periods=days, freq="D")
 
-    # start with near-zero baseline for every day
-    revenue = rng.lognormal(mean=np.log(baseline_revenue), sigma=0.3, size=days)
+    # Non-event days are genuinely closed -- zero revenue, not a tiny
+    # lognormal value. A near-zero-but-nonzero baseline here previously caused
+    # every day to count as "active", which made generate_transactions() split
+    # that tiny revenue into fake small transactions on days the merchant
+    # wasn't actually operating (same bug class as the earlier shock_event fix).
+    revenue = np.zeros(days)
 
     # randomly place n_events non-overlapping event windows
     event_windows = []
@@ -169,6 +172,13 @@ def generate_event_based_merchant(
             mean=np.log(event_revenue), sigma=event_noise_sigma, size=window_len
         )
 
+    # Build a mask of non-event days -- these get skipped entirely at
+    # transaction-generation time, same mechanism as apply_shock_event's
+    # shock_mask (a day marked True there means "generate zero transactions").
+    non_event_mask = np.ones(days, dtype=bool)
+    for start_idx, end_idx in event_windows:
+        non_event_mask[start_idx:end_idx] = False
+
     df = pd.DataFrame({"date": dates, "revenue": revenue})
 
     return {
@@ -176,11 +186,11 @@ def generate_event_based_merchant(
         "archetype": "event_based",
         "expected_eligible": "ambiguous — requires event-aware scoring",
         "params": {
-            "baseline_revenue": baseline_revenue,
             "event_revenue": event_revenue,
             "n_events": n_events,
             "event_windows": event_windows,  # keep the actual dates used, useful for debugging
         },
+        "non_event_mask": non_event_mask
     }
 
 def get_annual_multiplier(dates, seasonal_peak_date=None, seasonal_amplitude=0.0, seasonal_width_days=10):
@@ -420,7 +430,7 @@ def generate_and_save_merchant(
 
     if archetype_name == "event_based":
         result = generate_event_based_merchant(days=days, start_date=start_date, seed=seed)
-        shock_mask = None
+        shock_mask = result["non_event_mask"]
     else:
         if archetype_name not in ARCHETYPE_CONFIGS:
             raise ValueError(f"Unknown archetype_name: {archetype_name}")
