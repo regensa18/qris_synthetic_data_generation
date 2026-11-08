@@ -1,0 +1,12 @@
+qris_venv/
+__pycache__/
+*.pyc
+.DS_Store
+.DS_Store*
+.ipynb_checkpoints
+.venv/
+settings.json
+pyrightconfig.json
+synthetic_merchants/
+.vscode/
+synthetic_merchants_with_shock/
